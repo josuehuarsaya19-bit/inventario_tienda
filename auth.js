@@ -7,12 +7,23 @@ const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET;
 const PASSWORD_MIN_LENGTH = 8;
 const TOKEN_EXPIRATION = '1h';
+const ADMIN_SETUP_LOCK = 'rallyscale_admin_setup';
 
 if (!JWT_SECRET || JWT_SECRET.length < 32) {
     throw new Error('Configura JWT_SECRET con al menos 32 caracteres en el archivo .env');
 }
 
-// Registra usuarios guardando solamente el hash de su contraseña.
+router.get('/setup-status', async (req, res) => {
+    try {
+        const [usuarios] = await db.query('SELECT COUNT(*) AS total FROM usuarios');
+        return res.json({ registroDisponible: Number(usuarios[0].total) === 0 });
+    } catch (err) {
+        console.error('Error al consultar el estado de configuración:', err.message);
+        return res.status(500).json({ error: 'No se pudo consultar el estado de configuración' });
+    }
+});
+
+// El registro solo está disponible para crear la cuenta inicial de administración.
 router.post('/register', async (req, res) => {
     const { nombre, email, password } = req.body;
     const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
@@ -27,9 +38,26 @@ router.post('/register', async (req, res) => {
         return res.status(400).json({ error: `La contraseña debe tener al menos ${PASSWORD_MIN_LENGTH} caracteres` });
     }
 
+    let connection;
+    let lockAcquired = false;
     try {
         const passwordHash = await bcrypt.hash(password, 12);
-        const [resultado] = await db.query(
+        connection = await db.getConnection();
+        const [lockRows] = await connection.query(
+            'SELECT GET_LOCK(?, 10) AS adquirido',
+            [ADMIN_SETUP_LOCK]
+        );
+        lockAcquired = Number(lockRows[0].adquirido) === 1;
+        if (!lockAcquired) {
+            return res.status(503).json({ error: 'No se pudo iniciar la configuración. Inténtalo nuevamente.' });
+        }
+
+        const [usuarios] = await connection.query('SELECT COUNT(*) AS total FROM usuarios');
+        if (Number(usuarios[0].total) > 0) {
+            return res.status(409).json({ error: 'La cuenta de administración ya fue configurada' });
+        }
+
+        const [resultado] = await connection.query(
             'INSERT INTO usuarios (nombre, email, password) VALUES (?, ?, ?)',
             [nombre.trim(), normalizedEmail, passwordHash]
         );
@@ -44,8 +72,19 @@ router.post('/register', async (req, res) => {
         if (err.code === 'ER_DUP_ENTRY') {
             return res.status(409).json({ error: 'Ya existe una cuenta con ese correo electrónico' });
         }
-        console.error('Error al registrar usuario:', err.message);
+        console.error('Error al configurar la cuenta de administración:', err.message);
         return res.status(500).json({ error: 'No se pudo registrar el usuario' });
+    } finally {
+        if (connection) {
+            if (lockAcquired) {
+                try {
+                    await connection.query('SELECT RELEASE_LOCK(?)', [ADMIN_SETUP_LOCK]);
+                } catch (err) {
+                    console.error('Error al liberar el bloqueo de configuración:', err.message);
+                }
+            }
+            connection.release();
+        }
     }
 });
 

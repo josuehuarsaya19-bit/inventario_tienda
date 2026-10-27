@@ -1,12 +1,18 @@
 const express = require('express');
 require('dotenv').config();
 const db = require('./db');
+const { uploadDirectory } = require('./imageStorage');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 
 app.disable('x-powered-by');
 app.use(express.json({ limit: '10kb' }));
+app.use('/api/uploads', express.static(uploadDirectory, {
+    index: false,
+    maxAge: '7d',
+    immutable: true
+}));
 
 const { router: authRoutes } = require('./auth');
 const productosRoutes = require('./productos');
@@ -36,6 +42,11 @@ async function iniciarServidor() {
     }
 
     await db.query('SELECT 1');
+    const [imageColumns] = await db.query("SHOW COLUMNS FROM productos LIKE 'imagen_url'");
+    if (imageColumns.length === 0) {
+        await db.query('ALTER TABLE productos ADD COLUMN imagen_url VARCHAR(255) NULL');
+        console.log('Migración aplicada: productos.imagen_url');
+    }
 
     const server = app.listen(PORT, () => {
         console.log(`Servidor HTTP escuchando en http://localhost:${PORT}`);
